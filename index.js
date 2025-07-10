@@ -8,33 +8,36 @@ const express = require('express');
 const { Pool } = require('pg');
 require('dotenv').config();
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 
-const corsOptions = {
-    origin: '*', // Permite qualquer origem. Use isso para testar.
-                 // Em produção, mude para: origin: 'https://seu-dominio-do-frontend.com.br',
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-    credentials: true,
-    optionsSuccessStatus: 204
-};
-app.use(cors(corsOptions));
-
+app.use(cors({ 
+    origin: '*', 
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', 
+    credentials: true, 
+    optionsSuccessStatus: 204 
+}));
 app.use(express.json());
+
+// --- Variáveis de Ambiente e Constantes ---
+const TELEGRAM_SESSION = process.env.TELEGRAM_SESSION;
+const DATABASE_URL = process.env.DATABASE_URL;
+const PORT = process.env.PORT;
+const API_KEY = process.env.API_KEY; 
+const FACEBOOK_PIXEL_ID = process.env.FACEBOOK_PIXEL_ID;
+const FACEBOOK_API_TOKEN = process.env.FACEBOOK_API_TOKEN;
+const PUSHINPAY_API_TOKEN = process.env.PUSHINPAY_API_TOKEN;
 
 const apiId = 22098369; 
 const apiHash = 'c69c5b4724a59ddacc95b3e3d7612673'; 
-const stringSession = new StringSession(process.env.TELEGRAM_SESSION || '1AQAOMTQ5LjE1NC4xNzUuNjABuzgTkvbJ/1C07ouXjXSYHzxGMsgwjmDBAv7dqlkk++33FwYJjUHeJaJFYTncRDa9exYoDB8BRuP/bGMA7P1g+pFzonYs4CLM4JLPS9wy+zDxww/SJ/me7VayqcJDUI01Wdpf0kE+v8yoUYIUnFkH+aSfRySxocXPlwJ5DF5GcrukG6su0itxqrPOONrEds0hD60Mhybl15l+RHoByEI0qufre2/TCW+nOHDiOPwbfxMlZwiLkGtaWUJmKal1MnyRKOYxwStuZrs9tw5Py0zibbAGZWK/cEmhFxGGjLOw8SEDLYdl+nz+qxMkr5m58Vw3mVt+wS19TfiK/1q+AqnV3dc=');
-const CHAT_ID = BigInt(-1002815634418); 
+const stringSession = new StringSession(TELEGRAM_SESSION || '');
+const CHAT_ID = BigInt(-1002815634418);
 
-const PORT = process.env.PORT || 3000; 
-
-// --- CONFIGURAÇÃO DO BANCO DE DADOS POSTGRESQL ---
+// --- Configuração do Banco de Dados PostgreSQL ---
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false
-    }
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
 });
 
 pool.on('connect', () => {
@@ -43,105 +46,119 @@ pool.on('connect', () => {
 
 pool.on('error', (err) => {
     console.error('❌ Erro inesperado no pool do PostgreSQL:', err);
-    process.exit(-1);
+    process.exit(1);
 });
 
-// --- FUNÇÃO PARA INICIALIZAR TABELAS NO POSTGRESQL ---
-async function setupDatabase() {
-    try {
-        const client = await pool.connect();
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS vendas (
-                id SERIAL PRIMARY KEY,
-                chave TEXT UNIQUE NOT NULL,
-                hash TEXT UNIQUE NOT NULL,
-                valor REAL NOT NULL,
-                utm_source TEXT,
-                utm_medium TEXT,
-                utm_campaign TEXT,
-                utm_content TEXT,
-                utm_term TEXT,
-                order_id TEXT,
-                transaction_id TEXT,
-                ip TEXT,
-                user_agent TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-        console.log('✅ Tabela "vendas" verificada/criada no PostgreSQL.');
+// --- Função Auxiliar para Criptografia ---
+function hashData(data) {
+    if (!data) {
+        return null;
+    }
+    const cleanedData = String(data).replace(/[^0-9]/g, '');
+    const hash = crypto.createHash('sha256').update(cleanedData.toLowerCase().trim()).digest('hex');
+    return hash;
+}
 
-        await client.query(`
+// --- FUNÇÕES DO BANCO DE DADOS ---
+async function setupDatabase() {
+    console.log('🔄 Iniciando configuração do banco de dados...');
+    const client = await pool.connect();
+    try {
+        const sqlVendas = `
+            CREATE TABLE IF NOT EXISTS vendas (
+                id SERIAL PRIMARY KEY, 
+                chave TEXT UNIQUE NOT NULL, 
+                hash TEXT UNIQUE NOT NULL, 
+                valor REAL NOT NULL, 
+                utm_source TEXT, 
+                utm_medium TEXT, 
+                utm_campaign TEXT, 
+                utm_content TEXT, 
+                utm_term TEXT, 
+                order_id TEXT, 
+                transaction_id TEXT, 
+                ip TEXT, 
+                user_agent TEXT, 
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, 
+                facebook_purchase_sent BOOLEAN DEFAULT FALSE
+            );
+        `;
+        await client.query(sqlVendas);
+        console.log('✅ Tabela "vendas" verificada.');
+
+        const sqlFrontendUtms = `
             CREATE TABLE IF NOT EXISTS frontend_utms (
-                id SERIAL PRIMARY KEY,
+                id SERIAL PRIMARY KEY, 
                 unique_click_id TEXT UNIQUE NOT NULL, 
-                timestamp_ms BIGINT NOT NULL,
+                timestamp_ms BIGINT NOT NULL, 
                 valor REAL, 
                 fbclid TEXT, 
-                utm_source TEXT,
-                utm_medium TEXT,
-                utm_campaign TEXT,
-                utm_content TEXT,
-                utm_term TEXT,
-                ip TEXT,
+                fbc TEXT, 
+                fbp TEXT, 
+                utm_source TEXT, 
+                utm_medium TEXT, 
+                utm_campaign TEXT, 
+                utm_content TEXT, 
+                utm_term TEXT, 
+                ip TEXT, 
+                user_agent TEXT, 
                 received_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
-        `);
-        console.log('✅ Tabela "frontend_utms" verificada/criada/atualizada no PostgreSQL.');
+        `;
+        await client.query(sqlFrontendUtms);
+        console.log('✅ Tabela "frontend_utms" verificada.');
 
-        await client.query(`
+        const sqlTelegramUsers = `
             CREATE TABLE IF NOT EXISTS telegram_users (
-                telegram_user_id TEXT PRIMARY KEY,
+                telegram_user_id TEXT PRIMARY KEY, 
                 unique_click_id TEXT, 
-                last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, 
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
-        `);
-        console.log('✅ Tabela "telegram_users" verificada/criada no PostgreSQL.');
+        `;
+        await client.query(sqlTelegramUsers);
+        console.log('✅ Tabela "telegram_users" verificada.');
 
-        client.release();
     } catch (err) {
         console.error('❌ Erro ao configurar tabelas no PostgreSQL:', err.message);
         process.exit(1);
+    } finally {
+        client.release();
     }
 }
 
-// --- FUNÇÕES DE UTILIDADE PARA O BANCO DE DADOS ---
-
-function gerarChaveUnica({ transaction_id }) {
-    return `chave-${transaction_id}`;
+function gerarChaveUnica({ transaction_id }) { 
+    return `chave-${transaction_id}`; 
 }
 
-function gerarHash({ transaction_id }) {
-    return `hash-${transaction_id}`;
+function gerarHash({ transaction_id }) { 
+    return `hash-${transaction_id}`; 
 }
 
 async function salvarVenda(venda) {
     console.log('💾 Tentando salvar venda no banco (PostgreSQL)...');
     const sql = `
         INSERT INTO vendas (
-            chave, hash, valor, utm_source, utm_medium,
-            utm_campaign, utm_content, utm_term,
-            order_id, transaction_id, ip, user_agent
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            chave, hash, valor, utm_source, utm_medium, utm_campaign, utm_content, utm_term, 
+            order_id, transaction_id, ip, user_agent, facebook_purchase_sent
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
         ON CONFLICT (hash) DO NOTHING;
     `;
-
     const valores = [
-        venda.chave,
-        venda.hash,
-        venda.valor,
-        venda.utm_source,
-        venda.utm_medium,
-        venda.utm_campaign,
-        venda.utm_content,
-        venda.utm_term,
-        venda.orderId,
-        venda.transaction_id,
-        venda.ip,
-        venda.userAgent
+        venda.chave, 
+        venda.hash, 
+        venda.valor, 
+        venda.utm_source, 
+        venda.utm_medium, 
+        venda.utm_campaign, 
+        venda.utm_content, 
+        venda.utm_term, 
+        venda.orderId, 
+        venda.transaction_id, 
+        venda.ip, 
+        venda.userAgent, 
+        venda.facebook_purchase_sent
     ];
-
     try {
         const res = await pool.query(sql, valores);
         if (res.rowCount > 0) {
@@ -167,29 +184,18 @@ async function vendaExiste(hash) {
 }
 
 async function saveUserClickAssociation(telegramUserId, uniqueClickId) {
+    const sql = `
+        INSERT INTO telegram_users (telegram_user_id, unique_click_id, last_activity) 
+        VALUES ($1, $2, NOW()) 
+        ON CONFLICT (telegram_user_id) DO UPDATE SET 
+            unique_click_id = EXCLUDED.unique_click_id, 
+            last_activity = NOW();
+    `;
     try {
-        await pool.query(
-            `INSERT INTO telegram_users (telegram_user_id, unique_click_id, last_activity)
-             VALUES ($1, $2, NOW())
-             ON CONFLICT (telegram_user_id) DO UPDATE SET unique_click_id = EXCLUDED.unique_click_id, last_activity = NOW();`,
-            [telegramUserId, uniqueClickId]
-        );
+        await pool.query(sql, [telegramUserId, uniqueClickId]);
         console.log(`✅ Associação user_id(${telegramUserId}) -> click_id(${uniqueClickId}) salva no DB.`);
     } catch (err) {
         console.error('❌ Erro ao salvar associação user_id-click_id no DB:', err.message);
-    }
-}
-
-async function getUniqueClickIdForUser(telegramUserId) {
-    try {
-        const res = await pool.query(
-            `SELECT unique_click_id FROM telegram_users WHERE telegram_user_id = $1 LIMIT 1;`,
-            [telegramUserId]
-        );
-        return res.rows.length > 0 ? res.rows[0].unique_click_id : null;
-    } catch (err) {
-        console.error('❌ Erro ao buscar unique_click_id para o user_id:', err.message);
-        return null;
     }
 }
 
@@ -197,25 +203,17 @@ async function salvarFrontendUtms(data) {
     console.log('💾 Tentando salvar UTMs do frontend no banco (PostgreSQL)...');
     const sql = `
         INSERT INTO frontend_utms (
-            unique_click_id, timestamp_ms, valor, fbclid, utm_source, utm_medium,
-            utm_campaign, utm_content, utm_term, ip
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+            unique_click_id, timestamp_ms, valor, fbclid, fbc, fbp, utm_source, utm_medium, 
+            utm_campaign, utm_content, utm_term, ip, user_agent
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
     `;
-
     const valores = [
-        data.unique_click_id,
-        data.timestamp,
-        data.valor,
-        data.fbclid || null, 
-        data.utm_source || null,
-        data.utm_medium || null,
-        data.utm_campaign || null,
-        data.utm_content || null,
-        data.utm_term || null,
-        data.ip || null
+        data.unique_click_id, data.timestamp, data.valor, 
+        data.fbclid || null, data.fbc || null, data.fbp || null, 
+        data.utm_source || null, data.utm_medium || null, data.utm_campaign || null, 
+        data.utm_content || null, data.utm_term || null, 
+        data.ip || null, data.user_agent || null
     ];
-
     try {
         await pool.query(sql, valores);
         console.log('✅ UTMs do frontend salvas no PostgreSQL!');
@@ -242,352 +240,321 @@ async function buscarUtmsPorUniqueClickId(uniqueClickId) {
     }
 }
 
-async function buscarUtmsPorTempoEValor(targetTimestamp, targetIp = null, windowMs = 120000) {
-    console.log(`🔎 Buscando UTMs do frontend por timestamp ${targetTimestamp} (janela de ${windowMs / 1000}s)...`);
-    const minTimestamp = targetTimestamp - windowMs;
-    const maxTimestamp = targetTimestamp + windowMs;
-
-    let sql = `
-        SELECT * FROM frontend_utms
-        WHERE timestamp_ms BETWEEN $1 AND $2
-    `;
-    let params = [minTimestamp, maxTimestamp];
-    let paramIndex = 3;
-
-    if (targetIp && targetIp !== 'telegram' && targetIp !== 'userbot') {
-        sql += ` AND ip = $${paramIndex++}`;
-        params.push(targetIp);
-    }
-
-    sql += ` ORDER BY ABS(timestamp_ms - $${paramIndex++}) ASC LIMIT 1`;
-    params.push(targetTimestamp);
-
-    try {
-        const res = await pool.query(sql, params);
-        if (res.rows.length > 0) {
-            console.log(`✅ UTMs do frontend encontradas para timestamp ${targetTimestamp}.`);
-            return res.rows[0];
-        } else {
-            console.log(`🔎 Nenhuma UTM do frontend encontrada para timestamp ${targetTimestamp} na janela.`);
-            return null;
-        }
-    } catch (err) {
-        console.error('❌ Erro ao buscar UTMs por tempo (PostgreSQL):', err.message);
-        return null;
-    }
-}
-
-// --- FUNÇÃO PARA LIMPAR DADOS ANTIGOS DA TABELA frontend_utms ---
 async function limparFrontendUtmsAntigos() {
-    console.log('🧹 Iniciando limpeza de UTMs antigos do frontend...');
+    console.log('🧹 Iniciando limpeza de UTMs antigos...');
     const cutoffTime = moment().subtract(24, 'hours').valueOf();
     const sql = `DELETE FROM frontend_utms WHERE timestamp_ms < $1`;
-
     try {
         const res = await pool.query(sql, [cutoffTime]);
-        console.log(`🧹 Limpeza de UTMs antigos do frontend: ${res.rowCount || 0} registros removidos.`);
+        if (res.rowCount > 0) {
+            console.log(`🧹 Limpeza de UTMs antigos: ${res.rowCount || 0} registros removidos.`);
+        }
     } catch (err) {
-        console.error('❌ Erro ao limpar UTMs antigos do frontend:', err.message);
+        console.error('❌ Erro ao limpar UTMs antigos:', err.message);
     }
 }
 
-
-// --- ENDPOINT HTTP PARA RECEBER UTMs DO FRONTEND ---
+// --- ENDPOINTS HTTP ---
 app.post('/frontend-utm-data', (req, res) => {
-    const { unique_click_id, timestamp, valor, fbclid, utm_source, utm_medium, utm_campaign, utm_content, utm_term, ip } = req.body;
-
-    console.log('🚀 [BACKEND] Dados do frontend recebidos:', {
-        unique_click_id, timestamp, valor, fbclid, utm_source, utm_medium, utm_campaign, utm_content, utm_term, ip
-    });
-
-    if (!unique_click_id || !timestamp || valor === undefined || valor === null) {
-        return res.status(400).send('unique_click_id, Timestamp e Valor são obrigatórios.');
+    console.log('🚀 [BACKEND] Dados do frontend recebidos:', req.body);
+    if (!req.body.unique_click_id || !req.body.timestamp) {
+        return res.status(400).send('unique_click_id e Timestamp são obrigatórios.');
     }
-
-    salvarFrontendUtms({
-        unique_click_id,
-        timestamp,
-        valor,
-        fbclid,
-        utm_source,
-        utm_medium,
-        utm_campaign,
-        utm_content,
-        utm_term,
-        ip
-    });
-
+    salvarFrontendUtms(req.body);
     res.status(200).send('Dados recebidos com sucesso!');
 });
 
-// --- Endpoint para ping (manter o serviço ativo) ---
 app.get('/ping', (req, res) => {
     console.log('💚 [PING] Recebida requisição /ping. Serviço está ativo.');
     res.status(200).send('Pong!');
 });
 
+// --- INICIALIZAÇÃO E LÓGICA PRINCIPAL ---
+app.listen(PORT || 3000, () => {
+    console.log(`🌐 Servidor HTTP Express escutando na porta ${PORT || 3000}.`);
 
-// --- INICIALIZA O SERVIDOR HTTP PRIMEIRO ---
-app.listen(PORT, () => {
-    console.log(`🌐 Servidor HTTP Express escutando na porta ${PORT}.`);
-    console.log('Este servidor ajuda a manter o bot ativo em plataformas de hospedagem e recebe dados do frontend.');
+    // --- LÓGICA DE AUTO-PING ---
+    // Define o intervalo do ping em minutos.
+    const PING_INTERVALO_MINUTOS = 1; 
+    const PING_INTERVALO_MS = PING_INTERVALO_MINUTOS * 60 * 1000;
 
-    // Configura o auto-ping
-    const pingInterval = 20 * 1000; // 20 segundos
-    setInterval(() => {
-        axios.get(`http://localhost:${PORT}/ping`)
-            .then(response => {
-                // console.log(`💚 Auto-ping bem-sucedido: ${response.status}`);
-            })
-            .catch(error => {
-                console.error(`💔 Erro no auto-ping: ${error.message}`);
-            });
-    }, pingInterval);
-    console.log(`⚡ Auto-ping configurado para cada ${pingInterval / 1000} segundos.`);
-
-
-    // --- APÓS O SERVIDOR HTTP ESTAR ESCUTANDO, INICIA AS TAREFAS ASSÍNCRONAS ---
-    (async () => {
-        // Configura o banco de dados
-        try {
-            await setupDatabase();
-            console.log('✅ Configuração do banco de dados concluída.');
-        } catch (dbError) {
-            console.error('❌ Erro fatal na configuração do banco de dados:', dbError.message);
-            process.exit(1);
+    // A função que fará o ping para manter o serviço ativo.
+    const selfPing = async () => {
+        // O Render define esta variável de ambiente com a URL pública do seu serviço.
+        const url = process.env.RENDER_EXTERNAL_URL; 
+        
+        if (url) {
+            try {
+                // Faz a requisição para a rota /ping da própria aplicação.
+                await axios.get(`${url}/ping`); 
+            } catch (err) {
+                console.error('❌ Erro no auto-ping:', err.message);
+            }
         }
-
-        limparFrontendUtmsAntigos();
-
+    };
+    
+    // --- LÓGICA DE INICIALIZAÇÃO ASSÍNCRONA ---
+    (async () => {
+        await setupDatabase();
+        
         setInterval(limparFrontendUtmsAntigos, 60 * 60 * 1000);
         console.log('🧹 Limpeza de UTMs antigos agendada para cada 1 hora.');
 
-        console.log('Iniciando userbot...');
-        const client = new TelegramClient(stringSession, apiId, apiHash, {
-            connectionRetries: 5,
-        });
+        // Inicia o intervalo do auto-ping.
+        setInterval(selfPing, PING_INTERVALO_MS);
+        console.log(`🔁 Auto-ping configurado para cada ${PING_INTERVALO_MINUTOS} minuto(s).`);
 
+        if (!TELEGRAM_SESSION) {
+            return console.error("❌ ERRO FATAL: TELEGRAM_SESSION não definida.");
+        }
+
+        console.log('Iniciando userbot...');
+        const client = new TelegramClient(new StringSession(TELEGRAM_SESSION), parseInt(apiId), apiHash, { connectionRetries: 5 });
+        
         try {
             await client.start({
-                phoneNumber: async () => input.text('Digite seu número com DDI (ex: +5511987654321): '),
+                phoneNumber: async () => input.text('Digite seu número com DDI: '),
                 password: async () => input.text('Senha 2FA (se tiver): '),
                 phoneCode: async () => input.text('Código do Telegram: '),
-                onError: (err) => console.log('Erro durante o login/start do cliente:', err),
+                onError: (err) => console.log('Erro login:', err),
             });
             console.log('✅ Userbot conectado!');
-            console.log('🔑 Nova StringSession para .env (após o primeiro login):', client.session.save());
+            console.log('🔑 Nova StringSession:', client.session.save());
         } catch (error) {
             console.error('❌ Falha ao iniciar o userbot:', error.message);
             process.exit(1);
         }
 
         // --- MANIPULAÇÃO DE MENSAGENS ---
+        // CORREÇÃO: Adicionado 'async' para permitir o uso de 'await' dentro do handler.
         client.addEventHandler(async (event) => {
             const message = event.message;
-            if (!message) return;
-
-            const chat = await message.getChat();
-            const incomingChatId = chat.id;
-
-            let normalizedIncomingChatId = incomingChatId;
-            if (typeof incomingChatId === 'bigint') {
-                if (incomingChatId < 0 && incomingChatId.toString().startsWith('-100')) {
-                    normalizedIncomingChatId = BigInt(incomingChatId.toString().substring(4));
-                } else if (incomingChatId < 0) {
-                    normalizedIncomingChatId = BigInt(incomingChatId * BigInt(-1));
-                }
-            } else {
-                normalizedIncomingChatId = BigInt(Math.abs(Number(incomingChatId)));
-            }
-
-            let normalizedConfiguredChatId = CHAT_ID;
-            if (typeof CHAT_ID === 'bigint') {
-                if (CHAT_ID < 0 && CHAT_ID.toString().startsWith('-100')) {
-                    normalizedConfiguredChatId = BigInt(CHAT_ID.toString().substring(4));
-                } else if (CHAT_ID < 0) {
-                    normalizedConfiguredChatId = BigInt(CHAT_ID * BigInt(-1));
-                }
-            } else {
-                normalizedConfiguredChatId = BigInt(Math.abs(Number(CHAT_ID)));
-            }
-
-            if (normalizedIncomingChatId !== normalizedConfiguredChatId) {
+            if (!message || message.chatId.toString() !== CHAT_ID.toString()) {
                 return;
             }
 
-            let texto = ''; // Inicializa como string vazia
-            if (message.message != null) { // Verifica se message.message existe e não é null/undefined
-                texto = String(message.message).replace(/\r/g, '').trim();
-            }
-
+            let texto = (message.message || '').replace(/\r/g, '').trim();
             if (texto.startsWith('/start ')) {
                 const startPayload = decodeURIComponent(texto.substring('/start '.length).trim());
                 await saveUserClickAssociation(message.senderId.toString(), startPayload);
-                console.log(`🤖 [BOT] User ${message.senderId} iniciado com unique_click_id: ${startPayload}`);
                 return;
             }
 
-            const idRegex = /ID\s+Transa(?:ç|c)[aã]o\s+Gateway[:：]?\s*([\w-]{10,})/i;
-            const valorLiquidoRegex = /Valor\s+L[ií]quido[:：]?\s*R?\$?\s*([\d.,]+)/i;
-            const codigoDeVendaRegex = /Código\s+de\s+Venda[:：]?\s*(.+)/i;
-            const nomeCompletoRegex = /Nome\s+Completo[:：]?\s*(.+)/i;
-            const emailRegex = /E-mail[:：]?\s*(\S+@\S+\.\S+)/i;
-            const metodoPagamentoRegex = /M[ée]todo\s+Pagamento[:：]?\s*(.+)/i;
-            const plataformaPagamentoRegex = /Plataforma\s+Pagamento[:：]?\s*(.+)/i;
-
-
-            const idMatch = texto.match(idRegex);
-            const valorLiquidoMatch = texto.match(valorLiquidoRegex);
-            const codigoDeVendaMatch = texto.match(codigoDeVendaRegex);
-
-            const telegramMessageTimestamp = message.date * 1000;
-
-            const nomeMatch = texto.match(nomeCompletoRegex);
-            const emailMatch = texto.match(emailRegex);
-            const metodoPagamentoMatch = texto.match(metodoPagamentoRegex);
-            const plataformaPagamentoMatch = texto.match(plataformaPagamentoRegex);
-
-            const customerName = nomeMatch ? nomeMatch[1].trim() : "Cliente Desconhecido";
-            const customerEmail = emailMatch ? emailMatch[1].trim() : "desconhecido@email.com";
-            const paymentMethod = metodoPagamentoMatch ? metodoPagamentoMatch[1].trim().toLowerCase().replace(' ', '_') : 'unknown';
-            const platform = plataformaPagamentoMatch ? plataformaPagamentoMatch[1].trim() : 'UnknownPlatform';
-            const status = 'paid';
-
+            const idMatch = texto.match(/ID\s+Transa(?:ç|c)[aã]o\s+Gateway[:：]?\s*([\w-]+)/i);
+            const valorLiquidoMatch = texto.match(/Valor\s+L[ií]quido[:：]?\s*R?\$?\s*([\d.,]+)/i);
+            
             if (!idMatch || !valorLiquidoMatch) {
-                console.log('⚠️ Mensagem sem dados completos de venda (ID da Transação Gateway ou Valor Líquido não encontrados).');
                 return;
             }
 
             try {
                 const transaction_id = idMatch[1].trim();
-                const valorLiquidoNum = parseFloat(valorLiquidoMatch[1].replace(/\./g, '').replace(',', '.').trim());
-
-                if (isNaN(valorLiquidoNum) || valorLiquidoNum <= 0) {
-                    console.log('⚠️ Valor Líquido numérico inválido ou menor/igual a zero:', valorLiquidoMatch[1]);
-                    return;
-                }
-
-                const chave = gerarChaveUnica({ transaction_id });
                 const hash = gerarHash({ transaction_id });
 
-                const jaExiste = await vendaExiste(hash);
-                if (jaExiste) {
-                    console.log(`🔁 Venda com hash ${hash} já registrada. Ignorando duplicata.`);
+                if (await vendaExiste(hash)) {
+                    console.log(`🔁 Venda com hash ${hash} já registrada. Ignorando.`);
                     return;
                 }
+                
+                console.log(`\n⚡ Nova venda detectada! Processando ID: ${transaction_id}`);
 
-                let utmsEncontradas = {
-                    utm_source: null,
-                    utm_medium: null,
-                    utm_campaign: null,
-                    utm_content: null,
-                    utm_term: null
-                };
-                let ipClienteFrontend = 'telegram';
+                // --- 1. DADOS PRIMÁRIOS (DA MENSAGEM DO TELEGRAM) ---
+                const nomeCompletoRegex = /Nome\s+Completo[:：]?\s*(.+)/i;
+                const emailRegex = /E-mail[:：]?\s*(\S+@\S+\.\S+)/i;
+                const codigoVendaRegex = /Código\s+de\s+Venda[:：]?\s*(.+)/i;
+                const plataformaPagamentoRegex = /Plataforma\s+Pagamento[:：]?\s*(.+)/i;
+                const metodoPagamentoRegex = /M[ée]todo\s+Pagamento[:：]?\s*(.+)/i;
+                
+                const nomeMatch = texto.match(nomeCompletoRegex);
+                const emailMatch = texto.match(emailRegex);
+                const codigoVendaMatch = texto.match(codigoVendaRegex);
+
+                let nomeDaMensagem = "Cliente Desconhecido";
+                if (nomeMatch && nomeMatch[1]) {
+                    nomeDaMensagem = nomeMatch[1].trim().split('|')[0];
+                }
+
+                let emailDaMensagem = null;
+                if (emailMatch && emailMatch[1]) {
+                    emailDaMensagem = emailMatch[1].trim();
+                }
+                
+                let valorDaMensagem = 0;
+                if (valorLiquidoMatch && valorLiquidoMatch[1]) {
+                    valorDaMensagem = parseFloat(valorLiquidoMatch[1].replace(/\./g, '').replace(',', '.'));
+                }
+
+                let codigoVendaDaMensagem = null;
+                if (codigoVendaMatch && codigoVendaMatch[1]) {
+                    codigoVendaDaMensagem = codigoVendaMatch[1].trim();
+                }
+
+                // --- 2. DADOS COMPLEMENTARES (DA API PUSHINPAY) ---
+                let dadosDaApi = null;
+                if (PUSHINPAY_API_TOKEN) {
+                    console.log(`🔎 Consultando API da Pushinpay para a transação ${transaction_id}...`);
+                    try {
+                        const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction_id}`, {
+                            headers: { 
+                                'Authorization': `Bearer ${PUSHINPAY_API_TOKEN}`,
+                                'Accept': 'application/json'
+                            }
+                        });
+                        dadosDaApi = response.data;
+                        console.log('✅ Dados da API Pushinpay obtidos com sucesso!');
+                    } catch (apiError) {
+                        console.warn(`⚠️  Não foi possível consultar a API da Pushinpay. Prosseguindo com os dados da mensagem.`);
+                    }
+                }
+
+                // --- 3. COMBINAÇÃO DOS DADOS ---
+                const finalCustomerName = dadosDaApi?.payer_name || nomeDaMensagem;
+                const finalCustomerEmail = emailDaMensagem;
+                const finalCustomerDocument = dadosDaApi?.payer_national_registration || null;
+                const finalValor = valorDaMensagem;
+                
+                console.log(`   -> Valor Líquido: R$ ${finalValor.toFixed(2)} | Nome Final: ${finalCustomerName}`);
+                if (finalCustomerDocument) {
+                    console.log(`   -> ✅ Documento (CPF/CNPJ) do cliente obtido via API.`);
+                } else {
+                    console.log(`   -> ⚠️  Documento do cliente não encontrado.`);
+                }
+
                 let matchedFrontendUtms = null;
-
-                // LÓGICA DE BUSCA ÚNICA: Prioriza APENAS o Código de Venda da mensagem
-                const extractedCodigoDeVenda = codigoDeVendaMatch ? codigoDeVendaMatch[1].trim() : null;
-                
-                if (extractedCodigoDeVenda) {
-                    console.log(`🤖 [BOT] Tentando encontrar UTMs pelo Código de Venda extraído da mensagem: ${extractedCodigoDeVenda}`);
-                    matchedFrontendUtms = await buscarUtmsPorUniqueClickId(extractedCodigoDeVenda);
-                } else {
-                    console.log(`⚠️ [BOT] Código de Venda não encontrado na mensagem. Nenhuma UTM correspondente será buscada.`);
+                if (codigoVendaDaMensagem) {
+                    matchedFrontendUtms = await buscarUtmsPorUniqueClickId(codigoVendaDaMensagem);
                 }
-                
-                // Os fallbacks anteriores por user_id e timestamp/IP foram REMOVIDOS,
-                // pois a busca agora é estritamente pelo Código de Venda.
-
                 if (matchedFrontendUtms) {
-                    utmsEncontradas.utm_source = matchedFrontendUtms.utm_source;
-                    utmsEncontradas.utm_medium = matchedFrontendUtms.utm_medium;
-                    utmsEncontradas.utm_campaign = matchedFrontendUtms.utm_campaign;
-                    utmsEncontradas.utm_content = matchedFrontendUtms.utm_content;
-                    utmsEncontradas.utm_term = matchedFrontendUtms.utm_term;
-                    ipClienteFrontend = matchedFrontendUtms.ip || 'frontend_matched';
                     console.log(`✅ [BOT] UTMs para ${transaction_id} atribuídas!`);
-                } else {
-                    console.log(`⚠️ [BOT] Nenhuma UTM correspondente encontrada para ${transaction_id} usando o Código de Venda. Enviando para UTMify sem UTMs de atribuição.`);
                 }
 
-                const orderId = transaction_id;
-                const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
+                let facebook_purchase_sent = false;
 
-                const payload = {
-                    orderId: orderId,
-                    platform: platform,
-                    paymentMethod: paymentMethod,
-                    status: status,
-                    createdAt: agoraUtc,
-                    approvedDate: agoraUtc,
-                    customer: {
-                        name: customerName,
-                        email: customerEmail,
-                        phone: null,
-                        document: null,
-                        country: 'BR',
-                        ip: ipClienteFrontend,
-                    },
-                    products: [
-                        {
-                            id: 'acesso-vip-bundle',
-                            name: 'Acesso VIP',
-                            planId: null,
-                            planName: null,
-                            quantity: 1,
-                            priceInCents: Math.round(valorLiquidoNum * 100)
+                // --- 4. ENVIO PARA UTMIFY ---
+                if (API_KEY) {
+                    let trackingParams = {
+                        utm_source: null,
+                        utm_medium: null,
+                        utm_campaign: null,
+                        utm_content: null,
+                        utm_term: null,
+                    };
+
+                    if (matchedFrontendUtms) {
+                        trackingParams.utm_source = matchedFrontendUtms.utm_source || null;
+                        trackingParams.utm_medium = matchedFrontendUtms.utm_medium || null;
+                        trackingParams.utm_campaign = matchedFrontendUtms.utm_campaign || null;
+                        trackingParams.utm_content = matchedFrontendUtms.utm_content || null;
+                        trackingParams.utm_term = matchedFrontendUtms.utm_term || null;
+                    } else {
+                        console.log(`⚠️ [BOT] Nenhuma UTM correspondente encontrada.`);
+                    }
+
+                    const platform = (texto.match(plataformaPagamentoRegex) || [])[1]?.trim() || 'UnknownPlatform';
+                    const paymentMethod = (texto.match(metodoPagamentoRegex) || [])[1]?.trim().toLowerCase().replace(' ', '_') || 'unknown';
+                    const agoraUtc = moment.utc().format('YYYY-MM-DD HH:mm:ss');
+                    
+                    const utmifyPayload = {
+                        orderId: transaction_id,
+                        platform: platform,
+                        paymentMethod: paymentMethod,
+                        status: 'paid',
+                        createdAt: agoraUtc,
+                        approvedDate: agoraUtc,
+                        customer: {
+                            name: finalCustomerName,
+                            email: finalCustomerEmail || "naoinformado@utmify.com",
+                            phone: null,
+                            document: finalCustomerDocument,
+                            ip: matchedFrontendUtms?.ip || '0.0.0.0'
+                        },
+                        products: [{
+                            id: 'acesso-vip-bundle', name: 'Acesso VIP', planId: '', planName: '',
+                            quantity: 1, priceInCents: Math.round(finalValor * 100)
+                        }],
+                        trackingParameters: trackingParams,
+                        commission: {
+                            totalPriceInCents: Math.round(finalValor * 100), gatewayFeeInCents: 0,
+                            userCommissionInCents: Math.round(finalValor * 100), currency: 'BRL'
+                        },
+                        isTest: false
+                    };
+                    
+                    try {
+                        const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', utmifyPayload, { headers: { 'x-api-token': API_KEY } });
+                        console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
+                    } catch (err) { 
+                        console.error('❌ [BOT] Erro ao enviar para UTMify:', err.response?.data || err.message); 
+                    }
+                }
+
+                // --- 5. ENVIO PARA FACEBOOK ---
+                if (FACEBOOK_PIXEL_ID && FACEBOOK_API_TOKEN) {
+                    console.log('➡️  [BOT] Iniciando envio para API de Conversões do Facebook...');
+                    
+                    const nomeCompleto = finalCustomerName.toLowerCase().split(' ');
+                    const primeiroNome = nomeCompleto[0];
+                    const sobrenome = nomeCompleto.length > 1 ? nomeCompleto.slice(1).join(' ') : null;
+
+                    const userData = {
+                        fn: [hashData(primeiroNome)],
+                        ln: [hashData(sobrenome)],
+                        external_id: [hashData(finalCustomerDocument)],
+                        client_ip_address: matchedFrontendUtms?.ip,
+                        client_user_agent: matchedFrontendUtms?.user_agent,
+                        fbc: matchedFrontendUtms?.fbc,
+                        fbp: matchedFrontendUtms?.fbp,
+                    };
+                    
+                    Object.keys(userData).forEach(key => {
+                        if (!userData[key] || (Array.isArray(userData[key]) && userData[key].length === 0) || userData[key][0] === null) {
+                            delete userData[key];
                         }
-                    ],
-                    trackingParameters: utmsEncontradas,
-                    commission: {
-                        totalPriceInCents: Math.round(valorLiquidoNum * 100),
-                        gatewayFeeInCents: 0,
-                        userCommissionInCents: Math.round(valorLiquidoNum * 100),
-                        currency: 'BRL'
-                    },
-                    isTest: false
-                };
+                    });
+                    
+                    const facebookPayload = {
+                        data: [{
+                            event_name: 'Purchase',
+                            event_time: message.date,
+                            event_id: transaction_id,
+                            action_source: 'website',
+                            user_data: userData,
+                            custom_data: {
+                                value: finalValor,
+                                currency: 'BRL'
+                            }
+                        }]
+                    };
 
-                for (const key in payload.trackingParameters) {
-                    if (payload.trackingParameters[key] === '') {
-                        payload.trackingParameters[key] = null;
+                    try {
+                        await axios.post(`https://graph.facebook.com/v19.0/${FACEBOOK_PIXEL_ID}/events?access_token=${FACEBOOK_API_TOKEN}`, facebookPayload);
+                        console.log(`✅ [BOT] Evento 'Purchase' (${transaction_id}) enviado para o Facebook.`);
+                        facebook_purchase_sent = true;
+                    } catch (err) {
+                        console.error('❌ [BOT] Erro ao enviar para o Facebook:', err.response?.data?.error || err.message);
                     }
                 }
-
-                const res = await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, {
-                    headers: {
-                        'x-api-token': process.env.API_KEY,
-                        'Content-Type': 'application/json'
-                    }
-                });
-
-                console.log('📬 [BOT] Resposta da UTMify:', res.status, res.data);
-                console.log('📦 [BOT] Pedido criado na UTMify:', res.data);
-
-                salvarVenda({
-                    chave,
-                    hash,
-                    valor: valorLiquidoNum,
-                    utm_source: utmsEncontradas.utm_source,
-                    utm_medium: utmsEncontradas.utm_medium,
-                    utm_campaign: utmsEncontradas.utm_campaign,
-                    utm_content: utmsEncontradas.utm_content,
-                    utm_term: utmsEncontradas.utm_term,
-                    orderId,
-                    transaction_id,
-                    ip: ipClienteFrontend,
-                    userAgent: 'userbot'
+                
+                // --- 6. SALVAMENTO FINAL NO BANCO ---
+                await salvarVenda({
+                    chave: gerarChaveUnica({ transaction_id }),
+                    hash: gerarHash({ transaction_id }),
+                    valor: finalValor,
+                    utm_source: matchedFrontendUtms?.utm_source,
+                    utm_medium: matchedFrontendUtms?.utm_medium,
+                    utm_campaign: matchedFrontendUtms?.utm_campaign,
+                    utm_content: matchedFrontendUtms?.utm_content,
+                    utm_term: matchedFrontendUtms?.utm_term,
+                    orderId: transaction_id,
+                    transaction_id: transaction_id,
+                    ip: matchedFrontendUtms?.ip,
+                    userAgent: matchedFrontendUtms?.user_agent,
+                    facebook_purchase_sent: facebook_purchase_sent
                 });
 
             } catch (err) {
-                console.error('❌ [BOT] Erro ao processar mensagem ou enviar para UTMify:', err.message);
-                if (err.response) {
-                    console.error('🛑 [BOT] Código de status da UTMify:', err.response.status);
-                    console.error('📩 [BOT] Resposta de erro da UTMify:', err.response.data);
-                }
+                console.error('❌ [BOT] Erro geral ao processar mensagem:', err.message);
             }
-
-        }, new NewMessage({ chats: [CHAT_ID], incoming: true }));
+        });
     })();
 });
